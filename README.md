@@ -1,6 +1,6 @@
 # CI/CD Pipeline Demo
 
-A Node.js REST API with a production-style, multi-stage GitHub Actions CI/CD pipeline. The pipeline — not the API — is the point: five chained jobs with dependency gates, artifact packaging, and an environment-protected deploy step.
+A Node.js REST API with the same 5-stage pipeline implemented on **three CI/CD platforms**: GitHub Actions, GitLab CI, and Azure DevOps Pipelines. The pipeline — not the API — is the point.
 
 ## Pipeline Architecture
 
@@ -8,34 +8,68 @@ A Node.js REST API with a production-style, multi-stage GitHub Actions CI/CD pip
 lint ──► unit-test ──► integration-test ──► build-artifact ──► deploy
 ```
 
-| Job | What it does | Gate |
-|---|---|---|
-| `lint` | ESLint code quality check | on every push / PR |
-| `unit-test` | Jest tests with coverage report | needs: lint |
-| `integration-test` | Playwright API tests against a live server | needs: unit-test |
-| `build-artifact` | Packages app into a tarball, uploads as artifact | needs: integration-test |
-| `deploy` | Downloads artifact, deploys to staging environment | needs: build-artifact + manual approval |
+| Stage | What it does |
+|---|---|
+| `lint` | ESLint code quality gate |
+| `unit-test` | Jest unit tests + coverage report published as artifact |
+| `integration-test` | Playwright API tests against a live Express server |
+| `build-artifact` | Packages app into a tarball, uploads as pipeline artifact |
+| `deploy` | Downloads artifact, deploys to staging — **manual gate required** |
 
-Each job only runs when the previous one passes (`needs:`). Failing tests block the artifact build; a failed build blocks the deploy. The deploy job targets a GitHub Environment named `staging` — add required reviewers there to require manual sign-off before any production push.
+Each stage only runs when the previous one passes. Failing tests block the artifact build; a failed build blocks the deploy.
+
+## Three-Platform Comparison
+
+The same pipeline logic is expressed in three different CI/CD syntaxes:
+
+| Platform | Config file | Job gating | Artifact handoff | Deploy gate |
+|---|---|---|---|---|
+| **GitHub Actions** | `.github/workflows/ci-cd.yml` | `needs:` | `upload-artifact` / `download-artifact` | `environment: staging` + required reviewers |
+| **GitLab CI** | `.gitlab-ci.yml` | `needs:` + `stages:` | `artifacts: paths:` | `when: manual` |
+| **Azure DevOps** | `azure-pipelines.yml` | `dependsOn:` | `PublishBuildArtifacts` / `DownloadBuildArtifacts` | `deployment:` job + `environment:` approval |
+
+### Key syntax differences
+
+```yaml
+# Job dependency — "don't run until X passes"
+GitHub Actions:  needs: [unit-test]
+GitLab CI:       needs: [unit-test]
+Azure DevOps:    dependsOn: UnitTest
+
+# Artifact — pass a file from one job to the next
+GitHub Actions:  uses: actions/upload-artifact@v4   /   actions/download-artifact@v4
+GitLab CI:       artifacts: paths: [artifact/]       /   (auto-downloaded via needs:)
+Azure DevOps:    PublishBuildArtifacts@1             /   DownloadBuildArtifacts@0
+
+# Deploy gate — require a human to approve before deploy runs
+GitHub Actions:  environment: staging  (add reviewers in Settings → Environments)
+GitLab CI:       when: manual          (click Play in the GitLab pipeline UI)
+Azure DevOps:    deployment: + environment: staging  (add approvals in Pipelines → Environments)
+
+# Deploy only from main, not PRs
+GitHub Actions:  if: github.ref == 'refs/heads/main'
+GitLab CI:       only: [main]
+Azure DevOps:    condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+```
 
 ## Tech Stack
 
 | Layer | Tool |
 |---|---|
 | API | Node.js · Express |
-| Unit tests | Jest · Supertest (mock-service pattern) |
+| Unit tests | Jest · Supertest |
 | Integration tests | Playwright (API mode) |
 | Linting | ESLint 9 |
-| CI/CD | GitHub Actions (5-job pipeline) |
+| CI/CD | GitHub Actions · GitLab CI · Azure DevOps |
 
 ## Running Locally
 
 ```bash
 npm install
-npm run lint            # ESLint
-npm run test:unit       # Jest unit tests
-npm run test:integration # Playwright integration tests
-npm start               # API server on http://localhost:3001
+npm run lint              # ESLint
+npm run test:unit         # Jest unit tests
+npm run test:integration  # Playwright integration tests
+npm start                 # API on http://localhost:3001
 ```
 
 ## API Endpoints
@@ -64,24 +98,15 @@ npm start               # API server on http://localhost:3001
 
 ## Test Coverage
 
-**Unit tests** (`tests/unit/`):
-- `productService.test.js` — create, getAll, getById, update, remove; validation rules; edge cases (33 tests)
-- `routes.test.js` — route handlers tested via mock-injected service (mirrors the Moq pattern from C# API testing); 200/201/204/400/404 paths (17 tests)
+**Unit tests** (`tests/unit/` — 39 tests):
+- `productService.test.js` — create, getAll, getById, update, remove; validation rules
+- `routes.test.js` — route handlers tested with mock-injected service (same pattern as Moq in C# unit testing); covers 200/201/204/400/404 paths
 
-**Integration tests** (`tests/integration/`):
+**Integration tests** (`tests/integration/` — 14 tests):
 - Full CRUD flow against a live Express server
 - Validation error responses (missing name, negative price, fractional stock)
-- 404 handling for unknown IDs
-- Response header checks (Content-Type, X-Powered-By absent)
-
-## Key Pipeline Concepts Demonstrated
-
-- **Job dependencies** (`needs:`) — strict sequencing; no deploy without green tests
-- **Artifact upload/download** — build job packages the app; deploy job downloads and uses it
-- **Coverage publishing** — Jest lcov coverage uploaded as a workflow artifact
-- **Test report publishing** — Playwright HTML report uploaded on pass or fail (`if: always()`)
-- **Environment protection** — `environment: staging` supports required reviewers and branch policies
-- **Conditional deploy** — deploy job only runs on `main` branch pushes, not PRs
+- 404 cases for unknown IDs
+- Response header checks (Content-Type present, X-Powered-By absent)
 
 ## Project Structure
 
@@ -89,21 +114,21 @@ npm start               # API server on http://localhost:3001
 cicd-pipeline-demo/
 ├── src/
 │   ├── services/
-│   │   └── productService.js     # Business logic + in-memory store
+│   │   └── productService.js       # Business logic + in-memory store
 │   ├── routes/
-│   │   └── products.js           # Express route factory (dependency-injected)
+│   │   └── products.js             # Route factory — accepts service dependency
 │   └── middleware/
 │       └── errorHandler.js
-├── server.js                     # Entry point (separate from app for testability)
+├── server.js                       # Entry point (separate from app for testability)
 ├── tests/
 │   ├── unit/
 │   │   ├── productService.test.js
 │   │   └── routes.test.js
 │   └── integration/
 │       └── products.spec.js
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yml             # 5-job pipeline
+├── .github/workflows/ci-cd.yml     # GitHub Actions pipeline
+├── .gitlab-ci.yml                  # GitLab CI pipeline
+├── azure-pipelines.yml             # Azure DevOps pipeline
 ├── jest.config.cjs
 ├── playwright.config.js
 └── eslint.config.js
